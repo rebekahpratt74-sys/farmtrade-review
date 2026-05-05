@@ -1,0 +1,293 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* -------------------- HELPERS -------------------- */
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function hasVerifiedEmail() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isSeller() {
+      return signedIn() && resource.data.sellerId == request.auth.uid;
+    }
+
+    function isConversationParticipant() {
+      return signedIn()
+        && request.auth.uid in resource.data.participantIds;
+    }
+
+    function isConversationParticipantById(conversationId) {
+      return signedIn()
+        && request.auth.uid in
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+    }
+
+    function validCategory(category) {
+      return category in ["livestock", "produce", "farm_goods", "equipment"];
+    }
+
+    function validStatus(status) {
+      return status in ["active", "inactive", "sold"];
+    }
+
+    function validPricingType(pricingType) {
+      return pricingType in ["total", "per_unit"];
+    }
+
+    function validCondition(condition) {
+      return condition in ["", "New", "Like New", "Good", "Fair", "For Parts"];
+    }
+
+    function validListingData(data) {
+      return data.keys().hasOnly([
+  "title",
+  "category",
+  "price",
+  "quantity",
+  "pricingType",
+  "unit",
+  "description",
+  "status",
+  "sellerId",
+  "city",
+  "state",
+  "zip",
+  "lat",
+  "lng",
+  "photoUrls",
+  "createdAt",
+  "updatedAt",
+  "condition",
+  "isPromoted",
+  "promotionExpiresAt"
+])
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 120
+        && data.category is string
+        && validCategory(data.category)
+        && data.price is number
+        && data.price >= 0
+        && (
+          !("quantity" in data)
+          || data.quantity == null
+          || data.quantity is number
+        )
+        && (
+          !("pricingType" in data)
+          || data.pricingType == null
+          || validPricingType(data.pricingType)
+        )
+        && (
+          !("unit" in data)
+          || data.unit == null
+          || data.unit is string
+        )
+        && (
+          !("description" in data)
+          || data.description == null
+          || (data.description is string && data.description.size() <= 5000)
+        )
+        && data.status is string
+        && validStatus(data.status)
+        && data.sellerId == request.auth.uid
+        && (
+          !("city" in data)
+          || data.city == null
+          || data.city is string
+        )
+        && (
+          !("state" in data)
+          || data.state == null
+          || data.state is string
+        )
+        && (
+          !("zip" in data)
+          || data.zip == null
+          || data.zip is string
+        )
+        && (
+          !("lat" in data)
+          || data.lat == null
+          || data.lat is number
+        )
+        && (
+          !("lng" in data)
+          || data.lng == null
+          || data.lng is number
+        )
+        && data.photoUrls is list
+        && data.photoUrls.size() <= 5
+        && (
+  !("condition" in data)
+  || data.condition == null
+  || (data.condition is string && validCondition(data.condition))
+)
+&& (
+  !("isPromoted" in data)
+  || data.isPromoted is bool
+)
+&& (
+  !("promotionExpiresAt" in data)
+  || data.promotionExpiresAt == null
+  || data.promotionExpiresAt is timestamp
+);
+    }
+
+    function validUserProfileUpdate() {
+      return request.resource.data.diff(resource.data).changedKeys().hasOnly([
+        "displayName",
+        "bio",
+        "photoUrl",
+        "updatedAt",
+        "website",
+        "ownerName",
+        "ownerName2",
+        "accountType",
+        "marketArea",
+        "name",
+        "expoPushTokens",
+        "email"
+      ]);
+    }
+
+    function validReviewRating(rating) {
+      return rating is int && rating >= 1 && rating <= 5;
+    }
+
+    /* -------------------- LISTINGS -------------------- */
+
+    match /listings/{listingId} {
+      allow read: if true;
+
+      allow create: if hasVerifiedEmail()
+        && request.resource.data.sellerId == request.auth.uid
+        && validListingData(request.resource.data);
+
+      allow update: if hasVerifiedEmail()
+  && isSeller()
+  && (
+    // ✅ normal updates
+    (
+      request.resource.data.sellerId == resource.data.sellerId
+      && validListingData(request.resource.data)
+    )
+    ||
+    // ✅ allow clearing promotion alert ONLY
+    (
+      request.resource.data.diff(resource.data).changedKeys().hasOnly(["promotionExpiredAlert"])
+    )
+  );
+
+      allow delete: if isSeller();
+    }
+
+    /* -------------------- USERS -------------------- */
+
+    match /users/{userId} {
+
+      allow read: if signedIn();
+
+      allow create, delete: if isOwner(userId);
+
+      allow update: if isOwner(userId)
+        && validUserProfileUpdate();
+
+      match /favorites/{favoriteId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /myReviews/{reviewId} {
+        allow read: if isOwner(userId);
+
+        allow create: if signedIn()
+          && request.auth.uid == userId
+          && request.resource.data.buyerId == request.auth.uid
+          && request.resource.data.sellerId is string
+          && validReviewRating(request.resource.data.rating);
+
+        allow update: if signedIn()
+          && request.auth.uid == userId
+          && resource.data.buyerId == request.auth.uid
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.sellerId == resource.data.sellerId
+          && validReviewRating(request.resource.data.rating);
+
+        allow delete: if signedIn()
+          && request.auth.uid == userId
+          && resource.data.buyerId == request.auth.uid;
+      }
+
+      match /reviews/{reviewId} {
+        allow read: if signedIn();
+
+        allow create: if signedIn()
+          && request.resource.data.buyerId == request.auth.uid
+          && request.resource.data.sellerId == userId
+          && validReviewRating(request.resource.data.rating);
+
+        allow update: if signedIn()
+          && (
+            (
+              resource.data.buyerId == request.auth.uid
+              && request.resource.data.buyerId == resource.data.buyerId
+              && request.resource.data.sellerId == resource.data.sellerId
+              && validReviewRating(request.resource.data.rating)
+            )
+            ||
+            (
+              resource.data.sellerId == request.auth.uid
+              && request.resource.data.buyerId == resource.data.buyerId
+              && request.resource.data.sellerId == resource.data.sellerId
+              && request.resource.data.rating == resource.data.rating
+            )
+          );
+
+        allow delete: if signedIn()
+          && resource.data.buyerId == request.auth.uid;
+      }
+    }
+
+    /* -------------------- CONVERSATIONS -------------------- */
+
+    match /conversations/{conversationId} {
+      allow read: if isConversationParticipant();
+
+      allow update: if isConversationParticipant();
+
+      allow create: if hasVerifiedEmail()
+        && request.auth.uid in request.resource.data.participantIds
+        && request.resource.data.participantIds is list
+        && request.resource.data.participantIds.size() == 2;
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isConversationParticipantById(conversationId);
+
+        allow create: if hasVerifiedEmail()
+          && isConversationParticipantById(conversationId)
+          && request.resource.data.keys().hasOnly([
+            "senderId",
+            "text",
+            "createdAt"
+          ])
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 2000;
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}
